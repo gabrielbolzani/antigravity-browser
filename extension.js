@@ -12,26 +12,49 @@ let proxyServer = null;
 let proxyPort = 0;
 let lastCapturedElement = null;
 let statusBarItem = null;
-let activeTargetOrigin = 'http://localhost:8080';
-let activeTargetUrl = 'http://localhost:8080';
+let activeTargetOrigin = 'http://localhost:3000';
+let activeTargetUrl = 'http://localhost:3000';
+let portPollingInterval = null;
 
-const inspectorScript = fs.readFileSync(path.join(__dirname, 'inspector.js'), 'utf8');
+const CANDIDATE_PORTS = [3000, 5173, 8080, 8000, 4200, 3001, 5174, 5175, 8081, 8082, 9000, 1234, 4321, 8888, 5000, 5001];
 
-const CANDIDATE_PORTS = [8080, 5173, 3000, 8000, 4200, 3001, 5174, 8081, 8082, 9000, 1234];
-
-function checkPortOpen(port, host = '127.0.0.1', timeout = 140) {
+function checkPortOpen(port, timeout = 350) {
   return new Promise((resolve) => {
-    const socket = new net.Socket();
-    let status = false;
-    socket.setTimeout(timeout);
-    socket.on('connect', () => {
-      status = true;
-      socket.destroy();
-    });
-    socket.on('timeout', () => socket.destroy());
-    socket.on('error', () => socket.destroy());
-    socket.on('close', () => resolve(status ? port : null));
-    socket.connect(port, host);
+    let settled = false;
+    const tryHost = (host) => {
+      if (settled) return;
+      const socket = new net.Socket();
+      socket.setTimeout(timeout);
+      socket.on('connect', () => {
+        if (!settled) {
+          settled = true;
+          socket.destroy();
+          resolve(port);
+        }
+      });
+      socket.on('timeout', () => socket.destroy());
+      socket.on('error', () => socket.destroy());
+      socket.on('close', () => {
+        if (!settled && host === '127.0.0.1') {
+          // If IPv4 failed, test IPv6 ::1 (common on modern Windows Node servers)
+          tryHost('::1');
+        } else if (!settled) {
+          settled = true;
+          resolve(null);
+        }
+      });
+      try {
+        socket.connect(port, host);
+      } catch (e) {
+        if (!settled && host === '127.0.0.1') {
+          tryHost('::1');
+        } else if (!settled) {
+          settled = true;
+          resolve(null);
+        }
+      }
+    };
+    tryHost('127.0.0.1');
   });
 }
 
@@ -84,7 +107,7 @@ function startProxyServer() {
           } catch (e) {}
         } else {
           // Sub-resource request (CSS, JS, images, fonts, fetch requests, etc.)
-          let base = activeTargetOrigin || 'http://localhost:8080';
+          let base = activeTargetOrigin || 'http://localhost:3000';
 
           // Extract base from Referer if available
           if (clientReq.headers['referer']) {
@@ -141,10 +164,13 @@ function startProxyServer() {
 
           const resHeaders = { ...proxyRes.headers };
 
-          // Strip frame & security restrictions
+          // Strip frame & security restrictions (CSP, X-Frame-Options, COOP, COEP)
           delete resHeaders['x-frame-options'];
           delete resHeaders['content-security-policy'];
           delete resHeaders['content-security-policy-report-only'];
+          delete resHeaders['cross-origin-opener-policy'];
+          delete resHeaders['cross-origin-embedder-policy'];
+          delete resHeaders['cross-origin-resource-policy'];
           resHeaders['access-control-allow-origin'] = '*';
           resHeaders['access-control-allow-headers'] = '*';
 
@@ -163,13 +189,19 @@ function startProxyServer() {
                 html = html.replace(/<meta\s+http-equiv=["']?Content-Security-Policy["']?[^>]*>/gi, '');
                 html = html.replace(/<meta\s+http-equiv=["']?X-Frame-Options["']?[^>]*>/gi, '');
 
-                // Injected script tag
-                const injectedTag = `\n<!-- Antigravity Inspector Injected -->\n<script data-antigravity="true">\n${inspectorScript}\n</script>\n`;
+                // Read inspector.js directly from disk
+                let inspectorContent = '';
+                try {
+                  inspectorContent = fs.readFileSync(path.join(__dirname, 'inspector.js'), 'utf8');
+                } catch (e) {}
 
-                if (html.includes('</body>')) {
-                  html = html.replace('</body>', `${injectedTag}</body>`);
-                } else if (html.includes('</html>')) {
-                  html = html.replace('</html>', `${injectedTag}</html>`);
+                // Injected script tag
+                const injectedTag = `\n<!-- Antigravity Inspector Injected -->\n<script data-antigravity="true">\n${inspectorContent}\n</script>\n`;
+
+                if (/<\/body>/i.test(html)) {
+                  html = html.replace(/<\/body>/i, `${injectedTag}</body>`);
+                } else if (/<\/html>/i.test(html)) {
+                  html = html.replace(/<\/html>/i, `${injectedTag}</html>`);
                 } else {
                   html += injectedTag;
                 }
@@ -221,14 +253,14 @@ function startProxyServer() {
     // Handle WebSocket upgrade for Hot Module Reloading (Vite, Next.js, Webpack)
     proxyServer.on('upgrade', (req, socket, head) => {
       try {
-        let target = activeTargetUrl || 'http://localhost:8080';
+        let target = activeTargetUrl || 'http://localhost:3000';
         const reqUrl = url.parse(req.url, true);
         if (reqUrl.pathname === '/__agy_proxy__' && reqUrl.query.url) {
           target = reqUrl.query.url;
         }
         const targetUrl = url.parse(target);
         const port = targetUrl.port || (targetUrl.protocol === 'https:' ? 443 : 80);
-        const hostname = targetUrl.hostname || '127.0.0.1';
+        const hostname = targetUrl.hostname === 'localhost' ? '127.0.0.1' : (targetUrl.hostname || '127.0.0.1');
 
         const targetSocket = net.connect(port, hostname, () => {
           targetSocket.write(
@@ -329,12 +361,15 @@ function getWebviewHtml(currentUrl, port, activePorts = []) {
       border-bottom: 1px solid #1e293b;
       display: flex;
       align-items: center;
-      padding: 0 12px;
+      padding: 0 10px;
       gap: 8px;
       user-select: none;
       flex-shrink: 0;
       z-index: 20;
+      overflow-x: auto;
+      scrollbar-width: none;
     }
+    .toolbar::-webkit-scrollbar { display: none; }
 
     .btn {
       background: transparent;
@@ -364,9 +399,9 @@ function getWebviewHtml(currentUrl, port, activePorts = []) {
       background: #0b0f19;
       border: 1px solid #334155;
       border-radius: 6px;
-      padding: 3px 10px;
-      gap: 8px;
-      min-width: 180px;
+      padding: 3px 8px;
+      gap: 6px;
+      min-width: 140px;
     }
     .url-bar-container:focus-within {
       border-color: #38bdf8;
@@ -379,8 +414,9 @@ function getWebviewHtml(currentUrl, port, activePorts = []) {
       border: none;
       outline: none;
       color: #f1f5f9;
-      font-size: 13px;
+      font-size: 12px;
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      min-width: 60px;
     }
 
     /* Active Ports Badge */
@@ -388,7 +424,7 @@ function getWebviewHtml(currentUrl, port, activePorts = []) {
       display: flex;
       align-items: center;
       gap: 4px;
-      margin-left: 4px;
+      flex-shrink: 0;
     }
     .port-chip {
       background: #1e3a5f;
@@ -404,10 +440,12 @@ function getWebviewHtml(currentUrl, port, activePorts = []) {
       align-items: center;
       gap: 4px;
       transition: all 0.15s ease;
+      flex-shrink: 0;
     }
     .port-chip:hover {
       background: #0284c7;
       color: #ffffff;
+      box-shadow: 0 0 8px rgba(2, 132, 199, 0.5);
     }
     .port-dot {
       width: 6px;
@@ -441,6 +479,10 @@ function getWebviewHtml(currentUrl, port, activePorts = []) {
       gap: 5px;
       transition: all 0.15s ease;
       user-select: none;
+      flex-shrink: 0;
+    }
+    .view-tab * {
+      pointer-events: none;
     }
     .view-tab:hover {
       color: #f1f5f9;
@@ -450,6 +492,7 @@ function getWebviewHtml(currentUrl, port, activePorts = []) {
       background: #0284c7;
       color: #ffffff;
       font-weight: 600;
+      box-shadow: 0 0 8px rgba(2, 132, 199, 0.4);
     }
     .view-icon-btn {
       background: transparent;
@@ -463,7 +506,9 @@ function getWebviewHtml(currentUrl, port, activePorts = []) {
       border-radius: 4px;
       cursor: pointer;
       transition: all 0.15s ease;
+      flex-shrink: 0;
     }
+    .view-icon-btn * { pointer-events: none; }
     .view-icon-btn:hover {
       color: #f1f5f9;
       background: #1e293b;
@@ -475,7 +520,7 @@ function getWebviewHtml(currentUrl, port, activePorts = []) {
       border: 1px solid #475569;
       color: #94a3b8;
       height: 32px;
-      padding: 0 12px;
+      padding: 0 10px;
       border-radius: 6px;
       display: flex;
       align-items: center;
@@ -486,6 +531,7 @@ function getWebviewHtml(currentUrl, port, activePorts = []) {
       transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
       flex-shrink: 0;
     }
+    .inspect-toggle-btn * { pointer-events: none; }
     .inspect-toggle-btn:hover {
       border-color: #38bdf8;
       color: #f1f5f9;
@@ -580,66 +626,70 @@ function getWebviewHtml(currentUrl, port, activePorts = []) {
       height: 100%;
       overflow: auto;
       display: flex;
-      align-items: center;
-      justify-content: center;
       background: #090d16;
-      padding: 0;
+      box-sizing: border-box;
     }
 
     .browser-device-frame {
-      width: 100%;
-      height: 100%;
-      position: relative;
-      transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1), height 0.3s cubic-bezier(0.4, 0, 0.2, 1), border-radius 0.3s, box-shadow 0.3s;
       display: flex;
       flex-direction: column;
+      position: relative;
+      background: #ffffff;
+      transition: width 0.25s ease, height 0.25s ease;
     }
 
     /* Desktop Mode (100% full responsive) */
+    .browser-stage.view-desktop {
+      padding: 0;
+    }
     .browser-stage.view-desktop .browser-device-frame {
       width: 100%;
       height: 100%;
       border: none;
       border-radius: 0;
       box-shadow: none;
+      margin: 0;
+      flex-shrink: 0;
     }
 
-    /* Mobile Mode (iPhone 14/15 size: 390 x 844) */
+    /* Mobile Mode (iPhone 14: 390 x 844) */
+    .browser-stage.view-mobile {
+      padding: 24px;
+    }
     .browser-stage.view-mobile .browser-device-frame {
       width: 390px;
       height: 844px;
-      max-height: calc(100% - 24px);
-      max-width: calc(100% - 24px);
+      margin: auto;
       border: 8px solid #1e293b;
       border-radius: 36px;
       box-shadow: 0 25px 60px rgba(0, 0, 0, 0.8), 0 0 0 1px #334155;
       overflow: hidden;
       background: #000;
+      flex-shrink: 0;
     }
     .browser-stage.view-mobile.landscape .browser-device-frame {
       width: 844px;
       height: 390px;
-      max-height: calc(100% - 24px);
-      max-width: calc(100% - 24px);
     }
 
     /* Tablet Mode (iPad: 768 x 1024) */
+    .browser-stage.view-tablet {
+      padding: 24px;
+    }
     .browser-stage.view-tablet .browser-device-frame {
       width: 768px;
       height: 1024px;
-      max-height: calc(100% - 24px);
-      max-width: calc(100% - 24px);
+      margin: auto;
       border: 10px solid #1e293b;
       border-radius: 24px;
       box-shadow: 0 25px 60px rgba(0, 0, 0, 0.8), 0 0 0 1px #334155;
       overflow: hidden;
       background: #000;
+      flex-shrink: 0;
     }
     .browser-stage.view-tablet.landscape .browser-device-frame {
       width: 1024px;
       height: 768px;
-      max-height: calc(100% - 24px);
-      max-width: calc(100% - 24px);
     }
 
     iframe {
@@ -746,15 +796,14 @@ function getWebviewHtml(currentUrl, port, activePorts = []) {
 
     <div class="url-bar-container">
       <span class="url-icon">&#x1f512;</span>
-      <input type="text" class="url-input" id="url-input" value="${currentUrl}" placeholder="http://localhost:8080">
-      
+      <input type="text" class="url-input" id="url-input" value="${currentUrl}" placeholder="http://localhost:3000">
       <!-- Portas ativas detectadas automaticamente -->
       <div class="ports-badge-container" id="ports-badge-container"></div>
     </div>
 
     <!-- RESPONSIVE VIEW SWITCHER: PC / MOBILE / TABLET -->
     <div class="view-switch-container">
-      <button class="view-tab active" id="view-desktop" title="Versão PC / Computador (100% tela)">
+      <button class="view-tab active" id="view-desktop" title="Versão PC / Computador (100% da tela)">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
           <line x1="8" y1="21" x2="16" y2="21"></line>
@@ -783,8 +832,8 @@ function getWebviewHtml(currentUrl, port, activePorts = []) {
       </button>
     </div>
 
-    <!-- BOTÃO PARA ACIONAR E DESACIONAR O RECURSO -->
-    <button class="inspect-toggle-btn" id="btn-inspect-toggle" title="Clique para ACIONAR ou DESACIONAR a seleção de elementos">
+    <!-- BOTÃO PARA ACIONAR E DESACIONAR A SELEÇÃO -->
+    <button class="inspect-toggle-btn" id="btn-inspect-toggle" title="Clique para ACIONAR ou DESACIONAR a seleção de elementos na tela">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
         <line x1="8" y1="21" x2="16" y2="21"></line>
@@ -806,7 +855,7 @@ function getWebviewHtml(currentUrl, port, activePorts = []) {
 
   <!-- Banner informativo quando o modo de seleção está ativo -->
   <div class="selection-banner" id="selection-banner">
-    <span>🎯 <b>Modo de Seleção Ativo:</b> Passe o mouse e clique no item que deseja inspecionar.</span>
+    <span>🎯 <b>Modo de Seleção Ativo:</b> Passe o mouse e clique no elemento que deseja inspecionar.</span>
     <button class="selection-banner-close" id="banner-cancel-btn">Desativar (ESC)</button>
   </div>
 
@@ -876,10 +925,20 @@ function getWebviewHtml(currentUrl, port, activePorts = []) {
       browserStage.className = 'browser-stage view-' + mode + (isLandscape ? ' landscape' : '');
     }
 
-    viewDesktop.addEventListener('click', () => setViewMode('desktop'));
-    viewMobile.addEventListener('click', () => setViewMode('mobile'));
-    viewTablet.addEventListener('click', () => setViewMode('tablet'));
-    viewRotate.addEventListener('click', () => {
+    viewDesktop.addEventListener('click', (e) => {
+      e.preventDefault();
+      setViewMode('desktop');
+    });
+    viewMobile.addEventListener('click', (e) => {
+      e.preventDefault();
+      setViewMode('mobile');
+    });
+    viewTablet.addEventListener('click', (e) => {
+      e.preventDefault();
+      setViewMode('tablet');
+    });
+    viewRotate.addEventListener('click', (e) => {
+      e.preventDefault();
       browserStage.classList.toggle('landscape');
     });
 
@@ -889,7 +948,7 @@ function getWebviewHtml(currentUrl, port, activePorts = []) {
       ports.forEach(p => {
         const chip = document.createElement('div');
         chip.className = 'port-chip';
-        chip.title = 'Servidor ativo detectado na porta ' + p + '. Clique para abrir.';
+        chip.title = 'Servidor detectado na porta ' + p + '. Clique para conectar.';
         chip.innerHTML = '<span class="port-dot"></span>⚡ :' + p;
         chip.addEventListener('click', () => {
           navigate('http://localhost:' + p);
@@ -954,8 +1013,14 @@ function getWebviewHtml(currentUrl, port, activePorts = []) {
       postInspectStateToIframe();
     }
 
-    btnInspectToggle.addEventListener('click', () => toggleInspectMode());
-    bannerCancelBtn.addEventListener('click', () => toggleInspectMode(false));
+    btnInspectToggle.addEventListener('click', (e) => {
+      e.preventDefault();
+      toggleInspectMode();
+    });
+    bannerCancelBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      toggleInspectMode(false);
+    });
 
     window.addEventListener('keydown', (e) => {
       if (e.key === 'Escape' && isInspectMode) {
@@ -976,7 +1041,6 @@ function getWebviewHtml(currentUrl, port, activePorts = []) {
       }
 
       if (event.data.type === 'AGY_INSPECTOR_READY') {
-        // O script dentro da página carregou e avisou que está pronto!
         if (isInspectMode) {
           postInspectStateToIframe();
         }
@@ -990,7 +1054,10 @@ function getWebviewHtml(currentUrl, port, activePorts = []) {
         try {
           const u = new URL(event.data.url);
           const realUrl = u.searchParams.get('url');
-          if (realUrl) urlInput.value = realUrl;
+          if (realUrl) {
+            urlInput.value = realUrl;
+            vscode.postMessage({ type: 'TARGET_URL_CHANGED', url: realUrl });
+          }
         } catch (e) {}
       }
 
@@ -1110,6 +1177,13 @@ function activate(context) {
         }
       }
 
+      // Update active origin and target URL
+      activeTargetUrl = defaultUrl;
+      try {
+        const u = new URL(defaultUrl);
+        activeTargetOrigin = `${u.protocol}//${u.host}`;
+      } catch (e) {}
+
       const port = await startProxyServer();
 
       if (currentPanel) {
@@ -1131,7 +1205,26 @@ function activate(context) {
 
         currentPanel.webview.html = getWebviewHtml(defaultUrl, port, activePorts);
 
+        // Start continuous background port polling while open
+        if (portPollingInterval) clearInterval(portPollingInterval);
+        portPollingInterval = setInterval(async () => {
+          if (!currentPanel) {
+            clearInterval(portPollingInterval);
+            portPollingInterval = null;
+            return;
+          }
+          const freshPorts = await detectActivePorts();
+          currentPanel.webview.postMessage({
+            type: 'ACTIVE_PORTS_UPDATED',
+            ports: freshPorts
+          });
+        }, 3500);
+
         currentPanel.onDidDispose(() => {
+          if (portPollingInterval) {
+            clearInterval(portPollingInterval);
+            portPollingInterval = null;
+          }
           currentPanel = null;
           vscode.commands.executeCommand('setContext', 'antigravityBrowserActive', false);
         }, null, context.subscriptions);
@@ -1144,6 +1237,17 @@ function activate(context) {
                 type: 'ACTIVE_PORTS_UPDATED',
                 ports: freshPorts
               });
+              break;
+            }
+
+            case 'TARGET_URL_CHANGED': {
+              if (message.url) {
+                activeTargetUrl = message.url;
+                try {
+                  const u = new URL(message.url);
+                  activeTargetOrigin = `${u.protocol}//${u.host}`;
+                } catch (e) {}
+              }
               break;
             }
 
@@ -1252,6 +1356,10 @@ function activate(context) {
 }
 
 function deactivate() {
+  if (portPollingInterval) {
+    clearInterval(portPollingInterval);
+    portPollingInterval = null;
+  }
   if (proxyServer) {
     try {
       proxyServer.close();

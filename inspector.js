@@ -13,10 +13,10 @@
   overlay.style.position = 'fixed';
   overlay.style.pointerEvents = 'none';
   overlay.style.zIndex = '2147483647';
-  overlay.style.transition = 'all 0.05s ease-out';
+  overlay.style.transition = 'top 0.04s ease-out, left 0.04s ease-out, width 0.04s ease-out, height 0.04s ease-out';
   overlay.style.display = 'none';
   overlay.style.border = '2px solid #0284c7';
-  overlay.style.backgroundColor = 'rgba(2, 132, 199, 0.18)';
+  overlay.style.backgroundColor = 'rgba(2, 132, 199, 0.2)';
   overlay.style.borderRadius = '4px';
   overlay.style.boxSizing = 'border-box';
 
@@ -32,19 +32,25 @@
   badge.style.fontSize = '11px';
   badge.style.fontFamily = 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace';
   badge.style.fontWeight = '600';
-  badge.style.padding = '3px 7px';
+  badge.style.padding = '3px 8px';
   badge.style.borderRadius = '4px 4px 0 0';
   badge.style.whiteSpace = 'nowrap';
-  badge.style.boxShadow = '0 2px 6px rgba(0,0,0,0.3)';
+  badge.style.boxShadow = '0 2px 8px rgba(0,0,0,0.35)';
   badge.style.lineHeight = '1.2';
   overlay.appendChild(badge);
 
   function attachOverlay() {
-    if (document.body && !document.body.contains(overlay)) {
-      document.body.appendChild(overlay);
-    } else if (!document.body && document.documentElement && !document.documentElement.contains(overlay)) {
-      document.documentElement.appendChild(overlay);
+    const root = document.body || document.documentElement;
+    if (root && !root.contains(overlay)) {
+      root.appendChild(overlay);
     }
+  }
+
+  function getElementClassName(el) {
+    if (!el) return '';
+    if (typeof el.className === 'string') return el.className;
+    if (el.className && typeof el.className.baseVal === 'string') return el.className.baseVal;
+    return '';
   }
 
   function getCssSelector(el) {
@@ -59,8 +65,9 @@
         parts.unshift(`#${cur.id}`);
         break;
       }
-      let className = cur.className && typeof cur.className === 'string' 
-        ? '.' + cur.className.trim().split(/\s+/).filter(Boolean).slice(0, 2).join('.') 
+      const rawClass = getElementClassName(cur);
+      let className = rawClass
+        ? '.' + rawClass.trim().split(/\s+/).filter(Boolean).slice(0, 2).join('.') 
         : '';
       
       let parent = cur.parentElement;
@@ -143,8 +150,8 @@
     overlay.style.width = `${rect.width}px`;
     overlay.style.height = `${rect.height}px`;
 
-    // Position badge above or inside
-    if (rect.top < 26) {
+    // Position badge above or inside if near top
+    if (rect.top < 28) {
       badge.style.bottom = 'auto';
       badge.style.top = '0';
       badge.style.borderRadius = '0 0 4px 4px';
@@ -156,19 +163,29 @@
 
     const tag = el.tagName.toLowerCase();
     const id = el.id ? `#${el.id}` : '';
-    const firstClass = el.className && typeof el.className === 'string' 
-      ? '.' + (el.className.trim().split(/\s+/).filter(Boolean)[0] || '')
-      : '';
+    const rawClass = getElementClassName(el);
+    const firstClass = rawClass.trim() ? '.' + (rawClass.trim().split(/\s+/).filter(Boolean)[0] || '') : '';
     badge.textContent = `${tag}${id}${firstClass} (${Math.round(rect.width)}×${Math.round(rect.height)})`;
   }
 
   function onMouseMove(e) {
     if (!isInspectMode) return;
-    const target = document.elementFromPoint(e.clientX, e.clientY);
+    const target = e.target && e.target !== overlay && !overlay.contains(e.target) 
+      ? e.target 
+      : document.elementFromPoint(e.clientX, e.clientY);
+
     if (target && target !== overlay && !overlay.contains(target)) {
       hoveredElement = target;
       updateHighlight(target);
     }
+  }
+
+  function onIntercept(e) {
+    if (!isInspectMode) return;
+    // Intercept mousedown, pointerdown, etc. to prevent navigation / click events in inspected page
+    e.preventDefault();
+    e.stopPropagation();
+    e.stopImmediatePropagation();
   }
 
   function onClick(e) {
@@ -177,19 +194,19 @@
     e.stopPropagation();
     e.stopImmediatePropagation();
 
-    const target = hoveredElement || document.elementFromPoint(e.clientX, e.clientY);
+    const target = hoveredElement || e.target || document.elementFromPoint(e.clientX, e.clientY);
     if (!target || target === overlay || overlay.contains(target)) return;
 
     // Green flash animation to confirm selection
     overlay.style.border = '2px solid #22c55e';
-    overlay.style.backgroundColor = 'rgba(34, 197, 94, 0.35)';
+    overlay.style.backgroundColor = 'rgba(34, 197, 94, 0.4)';
     badge.style.backgroundColor = '#16a34a';
 
     setTimeout(() => {
       overlay.style.border = '2px solid #0284c7';
-      overlay.style.backgroundColor = 'rgba(2, 132, 199, 0.18)';
+      overlay.style.backgroundColor = 'rgba(2, 132, 199, 0.2)';
       badge.style.backgroundColor = '#0284c7';
-    }, 450);
+    }, 400);
 
     const reactInfo = getReactInfo(target);
     const vueInfo = getVueInfo(target);
@@ -221,7 +238,7 @@
       data: {
         tagName: target.tagName.toLowerCase(),
         id: target.id || '',
-        className: typeof target.className === 'string' ? target.className : '',
+        className: getElementClassName(target),
         innerText: (target.innerText || target.textContent || '').trim().slice(0, 300),
         html: outerHtmlClean,
         cssSelector,
@@ -269,8 +286,15 @@
   });
 
   document.addEventListener('mousemove', onMouseMove, true);
+  document.addEventListener('pointerdown', onIntercept, true);
+  document.addEventListener('mousedown', onIntercept, true);
   document.addEventListener('click', onClick, true);
   document.addEventListener('keydown', onKeyDown, true);
+  window.addEventListener('scroll', () => {
+    if (isInspectMode && hoveredElement) {
+      updateHighlight(hoveredElement);
+    }
+  }, { passive: true });
 
   // Notify parent of location changes (SPA routing & navigation)
   function notifyUrl() {
