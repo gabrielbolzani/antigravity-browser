@@ -89,6 +89,19 @@ function startProxyServer() {
       try {
         const reqUrl = url.parse(clientReq.url, true);
 
+        // Serve inspector.js directly from proxy endpoint
+        if (reqUrl.pathname === '/__agy_inspector__.js') {
+          const inspectorPath = path.join(__dirname, 'inspector.js');
+          if (fs.existsSync(inspectorPath)) {
+            clientRes.writeHead(200, {
+              'Content-Type': 'application/javascript; charset=utf-8',
+              'Cache-Control': 'no-cache, no-store, must-revalidate',
+              'Access-Control-Allow-Origin': '*'
+            });
+            return fs.createReadStream(inspectorPath).pipe(clientRes);
+          }
+        }
+
         let targetFullUrl = null;
 
         if (reqUrl.pathname === '/__agy_proxy__') {
@@ -164,12 +177,12 @@ function startProxyServer() {
           const resHeaders = { ...proxyRes.headers };
 
           // Strip frame & security restrictions (CSP, X-Frame-Options, COOP, COEP)
-          delete resHeaders['x-frame-options'];
-          delete resHeaders['content-security-policy'];
-          delete resHeaders['content-security-policy-report-only'];
-          delete resHeaders['cross-origin-opener-policy'];
-          delete resHeaders['cross-origin-embedder-policy'];
-          delete resHeaders['cross-origin-resource-policy'];
+          Object.keys(resHeaders).forEach(k => {
+            const lk = k.toLowerCase();
+            if (lk === 'x-frame-options' || lk.startsWith('content-security-policy') || lk.startsWith('cross-origin-')) {
+              delete resHeaders[k];
+            }
+          });
           resHeaders['access-control-allow-origin'] = '*';
           resHeaders['access-control-allow-headers'] = '*';
 
@@ -194,13 +207,13 @@ function startProxyServer() {
                   inspectorContent = fs.readFileSync(path.join(__dirname, 'inspector.js'), 'utf8');
                 } catch (e) {}
 
-                // Injected script tag
-                const injectedTag = `\n<!-- Antigravity Inspector Injected -->\n<script data-antigravity="true">\n${inspectorContent}\n</script>\n`;
+                // Injected script tag: inline script + proxy script fallback
+                const injectedTag = `\n<!-- Antigravity Inspector Injected -->\n<script data-antigravity="true">\n${inspectorContent}\n</script>\n<script src="/__agy_inspector__.js" data-antigravity="true"></script>\n`;
 
                 if (/<\/body>/i.test(html)) {
-                  html = html.replace(/<\/body>/i, `${injectedTag}</body>`);
+                  html = html.replace(/<\/body>/i, () => `${injectedTag}</body>`);
                 } else if (/<\/html>/i.test(html)) {
-                  html = html.replace(/<\/html>/i, `${injectedTag}</html>`);
+                  html = html.replace(/<\/html>/i, () => `${injectedTag}</html>`);
                 } else {
                   html += injectedTag;
                 }
@@ -361,18 +374,23 @@ async function findElementInWorkspace(data) {
   const folders = vscode.workspace.workspaceFolders || [];
   if (folders.length === 0) return null;
 
+  const fileGlob = '**/*.{jsx,tsx,ts,js,vue,svelte,html,php}';
+  const excludeGlob = '**/node_modules/**';
+
   // 1. By ID
   if (data.id && data.id.length >= 2) {
     try {
-      const files = await vscode.workspace.findFiles('**/*.{jsx,tsx,vue,svelte,html,php}', '**/node_modules/**', 20);
+      const files = await vscode.workspace.findFiles(fileGlob, excludeGlob, 50);
       for (const f of files) {
-        const text = fs.readFileSync(f.fsPath, 'utf8');
-        const lines = text.split('\n');
-        for (let i = 0; i < lines.length; i++) {
-          if (lines[i].includes(`id="${data.id}"`) || lines[i].includes(`id='${data.id}'`)) {
-            return { filePath: f.fsPath, lineNumber: i + 1 };
+        try {
+          const text = fs.readFileSync(f.fsPath, 'utf8');
+          const lines = text.split('\n');
+          for (let i = 0; i < lines.length; i++) {
+            if (lines[i].includes(`id="${data.id}"`) || lines[i].includes(`id='${data.id}'`)) {
+              return { filePath: f.fsPath, lineNumber: i + 1 };
+            }
           }
-        }
+        } catch (e) {}
       }
     } catch (e) {}
   }
@@ -383,35 +401,42 @@ async function findElementInWorkspace(data) {
     if (classes.length > 0) {
       const targetClass = classes[0];
       try {
-        const files = await vscode.workspace.findFiles('**/*.{jsx,tsx,vue,svelte,html}', '**/node_modules/**', 20);
+        const files = await vscode.workspace.findFiles(fileGlob, excludeGlob, 50);
         for (const f of files) {
-          const text = fs.readFileSync(f.fsPath, 'utf8');
-          const lines = text.split('\n');
-          for (let i = 0; i < lines.length; i++) {
-            if (lines[i].includes(targetClass)) {
-              return { filePath: f.fsPath, lineNumber: i + 1 };
+          try {
+            const text = fs.readFileSync(f.fsPath, 'utf8');
+            const lines = text.split('\n');
+            for (let i = 0; i < lines.length; i++) {
+              if (lines[i].includes(targetClass)) {
+                return { filePath: f.fsPath, lineNumber: i + 1 };
+              }
             }
-          }
+          } catch (e) {}
         }
       } catch (e) {}
     }
   }
 
-  // 3. By innerText
-  if (data.innerText && data.innerText.length >= 4 && data.innerText.length <= 40) {
-    const cleanText = data.innerText.trim();
-    try {
-      const files = await vscode.workspace.findFiles('**/*.{jsx,tsx,vue,svelte,html}', '**/node_modules/**', 20);
-      for (const f of files) {
-        const text = fs.readFileSync(f.fsPath, 'utf8');
-        const lines = text.split('\n');
-        for (let i = 0; i < lines.length; i++) {
-          if (lines[i].includes(cleanText)) {
-            return { filePath: f.fsPath, lineNumber: i + 1 };
-          }
+  // 3. By innerText (clean line match)
+  if (data.innerText) {
+    const cleanLines = data.innerText.split('\n').map(l => l.trim()).filter(l => l.length >= 4 && l.length <= 60);
+    const targetText = cleanLines.length > 0 ? cleanLines[0] : null;
+    if (targetText) {
+      try {
+        const files = await vscode.workspace.findFiles(fileGlob, excludeGlob, 50);
+        for (const f of files) {
+          try {
+            const text = fs.readFileSync(f.fsPath, 'utf8');
+            const lines = text.split('\n');
+            for (let i = 0; i < lines.length; i++) {
+              if (lines[i].includes(targetText)) {
+                return { filePath: f.fsPath, lineNumber: i + 1 };
+              }
+            }
+          } catch (e) {}
         }
-      }
-    } catch (e) {}
+      } catch (e) {}
+    }
   }
 
   return null;
@@ -470,7 +495,7 @@ async function referenceElementInChat(data) {
 
     const shortClass = data.className ? '.' + data.className.trim().split(/\s+/)[0] : '';
     const elementLabel = `<${data.tagName}${data.id ? ' #' + data.id : ''}${shortClass}>`;
-    const promptMessage = `Estou referenciando o elemento UI ${elementLabel}${data.innerText ? ` ("${data.innerText.slice(0, 45).replace(/\n+/g, ' ')}")` : ''}. `;
+    const promptMessage = `Elemento selecionado: ${elementLabel}${data.innerText ? ` ("${data.innerText.slice(0, 45).replace(/\n+/g, ' ')}")` : ''}. `;
 
     let contextAdded = false;
 
@@ -492,7 +517,12 @@ async function referenceElementInChat(data) {
         try {
           await vscode.commands.executeCommand('antigravity.addContext', contextItem, promptMessage);
           contextAdded = true;
-        } catch (e2) {}
+        } catch (e2) {
+          try {
+            await vscode.commands.executeCommand('antigravity.addContext', contextItem);
+            contextAdded = true;
+          } catch (e2b) {}
+        }
       }
     }
 
@@ -507,7 +537,15 @@ async function referenceElementInChat(data) {
     // Always focus the Antigravity chat panel!
     try {
       await vscode.commands.executeCommand('antigravity.panel.focus');
-    } catch (e) {}
+    } catch (e) {
+      try {
+        await vscode.commands.executeCommand('antigravity.chatView.focus');
+      } catch (e2) {
+        try {
+          await vscode.commands.executeCommand('workbench.action.chat.open');
+        } catch (e3) {}
+      }
+    }
 
     // Open source file in background editor if available
     if (filePath && !filePath.includes('.antigravity')) {
@@ -1186,10 +1224,12 @@ function getWebviewHtml(currentUrl, port, activePorts = []) {
 
     function postInspectStateToIframe() {
       try {
-        iframe.contentWindow.postMessage({
+        const payload = {
           type: 'AGY_SET_INSPECT_MODE',
           enabled: isInspectMode
-        }, '*');
+        };
+        iframe.contentWindow.postMessage(payload, '*');
+        iframe.contentWindow.postMessage(JSON.stringify(payload), '*');
       } catch (err) {}
     }
 
@@ -1227,29 +1267,32 @@ function getWebviewHtml(currentUrl, port, activePorts = []) {
 
     // Mensagens vindas do iframe injetado ou do host da extensão
     window.addEventListener('message', (event) => {
-      if (!event.data || typeof event.data !== 'object') return;
+      if (!event.data) return;
+      let data = event.data;
+      if (typeof data === 'string') {
+        try { data = JSON.parse(data); } catch (e) {}
+      }
+      if (!data || typeof data !== 'object') return;
 
-      if (event.data.type === 'ACTIVE_PORTS_UPDATED') {
-        renderActivePorts(event.data.ports);
+      if (data.type === 'ACTIVE_PORTS_UPDATED') {
+        renderActivePorts(data.ports);
       }
 
-      if (event.data.type === 'TOGGLE_INSPECT') {
+      if (data.type === 'TOGGLE_INSPECT') {
         toggleInspectMode();
       }
 
-      if (event.data.type === 'AGY_INSPECTOR_READY') {
-        if (isInspectMode) {
-          postInspectStateToIframe();
-        }
+      if (data.type === 'AGY_INSPECTOR_READY') {
+        postInspectStateToIframe();
       }
 
-      if (event.data.type === 'AGY_DISABLE_INSPECTOR') {
+      if (data.type === 'AGY_DISABLE_INSPECTOR') {
         toggleInspectMode(false);
       }
 
-      if (event.data.type === 'AGY_URL_CHANGED') {
+      if (data.type === 'AGY_URL_CHANGED') {
         try {
-          const u = new URL(event.data.url);
+          const u = new URL(data.url);
           const realUrl = u.searchParams.get('url');
           if (realUrl) {
             urlInput.value = realUrl;
@@ -1258,12 +1301,12 @@ function getWebviewHtml(currentUrl, port, activePorts = []) {
         } catch (e) {}
       }
 
-      if (event.data.type === 'AGY_ELEMENT_SELECTED') {
-        selectedElementData = event.data.data;
+      if (data.type === 'AGY_ELEMENT_SELECTED') {
+        selectedElementData = data.data;
         updateSelectedElementUI(selectedElementData);
         toggleInspectMode(false);
 
-        // Dispara a criação da referência diretamente para o Chat com a IA
+        // Dispara a criação da referência diretamente para o Chat com a IA!
         vscode.postMessage({
           type: 'ELEMENT_CAPTURED',
           data: selectedElementData

@@ -16,7 +16,7 @@
   overlay.style.transition = 'top 0.04s ease-out, left 0.04s ease-out, width 0.04s ease-out, height 0.04s ease-out';
   overlay.style.display = 'none';
   overlay.style.border = '2px solid #0284c7';
-  overlay.style.backgroundColor = 'rgba(2, 132, 199, 0.2)';
+  overlay.style.backgroundColor = 'rgba(2, 132, 199, 0.22)';
   overlay.style.borderRadius = '4px';
   overlay.style.boxSizing = 'border-box';
 
@@ -40,7 +40,7 @@
   overlay.appendChild(badge);
 
   function attachOverlay() {
-    const root = document.body || document.documentElement;
+    const root = document.documentElement || document.body;
     if (root && !root.contains(overlay)) {
       root.appendChild(overlay);
     }
@@ -93,7 +93,7 @@
       let compSource = null;
 
       while (cur) {
-        const key = Object.keys(cur).find(k => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'));
+        const key = Object.keys(cur).find(k => k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance'));
         if (key) {
           let fiber = cur[key];
           while (fiber) {
@@ -215,31 +215,26 @@
     }
   }
 
-  function onIntercept(e) {
-    if (!isInspectMode) return;
-    // Intercept mousedown, pointerdown, etc. to prevent navigation / click events in inspected page
-    e.preventDefault();
-    e.stopPropagation();
-    e.stopImmediatePropagation();
-  }
-
   function onClick(e) {
     if (!isInspectMode) return;
     e.preventDefault();
     e.stopPropagation();
     e.stopImmediatePropagation();
 
-    const target = hoveredElement || e.target || document.elementFromPoint(e.clientX, e.clientY);
+    const target = (e.target && e.target !== overlay && !overlay.contains(e.target) && e.target !== document.body && e.target !== document.documentElement)
+      ? e.target
+      : (hoveredElement || document.elementFromPoint(e.clientX, e.clientY));
+
     if (!target || target === overlay || overlay.contains(target)) return;
 
     // Green flash animation to confirm selection
     overlay.style.border = '2px solid #22c55e';
-    overlay.style.backgroundColor = 'rgba(34, 197, 94, 0.4)';
+    overlay.style.backgroundColor = 'rgba(34, 197, 94, 0.45)';
     badge.style.backgroundColor = '#16a34a';
 
     setTimeout(() => {
       overlay.style.border = '2px solid #0284c7';
-      overlay.style.backgroundColor = 'rgba(2, 132, 199, 0.2)';
+      overlay.style.backgroundColor = 'rgba(2, 132, 199, 0.22)';
       badge.style.backgroundColor = '#0284c7';
     }, 400);
 
@@ -289,6 +284,7 @@
 
     try {
       window.parent.postMessage(payload, '*');
+      window.parent.postMessage(JSON.stringify(payload), '*');
     } catch (err) {}
   }
 
@@ -301,9 +297,15 @@
   }
 
   window.addEventListener('message', (event) => {
-    if (!event.data || typeof event.data !== 'object') return;
-    if (event.data.type === 'AGY_SET_INSPECT_MODE') {
-      isInspectMode = !!event.data.enabled;
+    if (!event.data) return;
+    let data = event.data;
+    if (typeof data === 'string') {
+      try { data = JSON.parse(data); } catch (e) {}
+    }
+    if (!data || typeof data !== 'object') return;
+
+    if (data.type === 'AGY_SET_INSPECT_MODE') {
+      isInspectMode = !!data.enabled;
       if (document.body) {
         document.body.style.cursor = isInspectMode ? 'crosshair' : 'default';
       }
@@ -321,15 +323,14 @@
   });
 
   document.addEventListener('mousemove', onMouseMove, true);
-  document.addEventListener('pointerdown', onIntercept, true);
-  document.addEventListener('mousedown', onIntercept, true);
+  document.addEventListener('mouseover', onMouseMove, true);
   document.addEventListener('click', onClick, true);
   document.addEventListener('keydown', onKeyDown, true);
   window.addEventListener('scroll', () => {
     if (isInspectMode && hoveredElement) {
       updateHighlight(hoveredElement);
     }
-  }, { passive: true });
+  }, { capture: true, passive: true });
 
   // Notify parent of location changes (SPA routing & navigation)
   function notifyUrl() {
