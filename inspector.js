@@ -88,28 +88,63 @@
   function getReactInfo(dom) {
     try {
       let cur = dom;
+      let hostSource = null;
+      let compName = null;
+      let compSource = null;
+
       while (cur) {
         const key = Object.keys(cur).find(k => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'));
         if (key) {
           let fiber = cur[key];
           while (fiber) {
+            // Check debugSource or source on fiber or props
+            const src = fiber._debugSource || fiber._source || fiber.memoizedProps?.__source || fiber.pendingProps?.__source;
+            if (src && !hostSource) {
+              hostSource = src;
+            }
+
             const type = fiber.type;
             if (type && (typeof type === 'function' || typeof type === 'object')) {
-              const compName = type.displayName || type.name || (type.render && (type.render.displayName || type.render.name));
-              const source = fiber._debugSource || fiber._source;
-              if (compName && compName !== 'Anonymous' && !compName.startsWith('styled.')) {
-                return {
-                  componentName: compName,
-                  fileName: source ? source.fileName : null,
-                  lineNumber: source ? source.lineNumber : null,
-                  columnNumber: source ? source.columnNumber : null
-                };
+              const name = type.displayName || type.name || (type.render && (type.render.displayName || type.render.name));
+              if (name && name !== 'Anonymous' && !name.startsWith('styled.') && !compName) {
+                compName = name;
+                compSource = src;
               }
             }
+
+            if (hostSource && compName) break;
             fiber = fiber.return;
           }
+          if (hostSource || compName) break;
         }
         cur = cur.parentElement;
+      }
+
+      // Check data attributes like data-source-file / data-source-line
+      if (!hostSource && !compSource) {
+        let p = dom;
+        while (p && p !== document.body && p !== document.documentElement) {
+          const dsFile = p.getAttribute('data-source-file') || p.getAttribute('data-loc-file') || p.getAttribute('data-astro-source-file');
+          const dsLine = p.getAttribute('data-source-line') || p.getAttribute('data-loc-line') || p.getAttribute('data-astro-source-loc');
+          if (dsFile) {
+            hostSource = {
+              fileName: dsFile,
+              lineNumber: parseInt(dsLine, 10) || 1
+            };
+            break;
+          }
+          p = p.parentElement;
+        }
+      }
+
+      const finalSource = hostSource || compSource;
+      if (compName || finalSource) {
+        return {
+          componentName: compName || (dom.tagName ? dom.tagName.toLowerCase() : 'Element'),
+          fileName: finalSource ? finalSource.fileName : null,
+          lineNumber: finalSource ? finalSource.lineNumber : null,
+          columnNumber: finalSource ? finalSource.columnNumber : null
+        };
       }
     } catch (e) {}
     return null;

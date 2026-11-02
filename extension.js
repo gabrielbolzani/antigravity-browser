@@ -36,7 +36,6 @@ function checkPortOpen(port, timeout = 350) {
       socket.on('error', () => socket.destroy());
       socket.on('close', () => {
         if (!settled && host === '127.0.0.1') {
-          // If IPv4 failed, test IPv6 ::1 (common on modern Windows Node servers)
           tryHost('::1');
         } else if (!settled) {
           settled = true;
@@ -324,16 +323,214 @@ function formatContextMarkdown(data) {
   return lines.join('\n');
 }
 
-async function sendToAntigravityChat(formattedText) {
-  try {
-    await vscode.commands.executeCommand('antigravity.addContext', formattedText);
-  } catch (err) {
-    console.warn('[Antigravity Browser] antigravity.addContext command not found, falling back to clipboard.');
+async function resolveSourceFile(rawFileName) {
+  if (!rawFileName) return null;
+  let clean = rawFileName.replace(/^[a-z]+:\/\/[^/]+/i, '');
+  clean = clean.replace(/^webpack:\/\/[^/]*\/?/i, '');
+  clean = clean.split('?')[0];
+
+  if (fs.existsSync(clean)) {
+    return clean;
   }
 
+  const folders = vscode.workspace.workspaceFolders || [];
+  for (const folder of folders) {
+    const root = folder.uri.fsPath;
+    const direct = path.join(root, clean);
+    if (fs.existsSync(direct)) return direct;
+
+    const relClean = clean.replace(/^[/\\]+/, '');
+    const relJoin = path.join(root, relClean);
+    if (fs.existsSync(relJoin)) return relJoin;
+
+    const baseName = path.basename(clean);
+    if (baseName && baseName.length > 2) {
+      try {
+        const found = await vscode.workspace.findFiles(`**/${baseName}`, '**/node_modules/**', 1);
+        if (found.length > 0) {
+          return found[0].fsPath;
+        }
+      } catch (e) {}
+    }
+  }
+
+  return null;
+}
+
+async function findElementInWorkspace(data) {
+  const folders = vscode.workspace.workspaceFolders || [];
+  if (folders.length === 0) return null;
+
+  // 1. By ID
+  if (data.id && data.id.length >= 2) {
+    try {
+      const files = await vscode.workspace.findFiles('**/*.{jsx,tsx,vue,svelte,html,php}', '**/node_modules/**', 20);
+      for (const f of files) {
+        const text = fs.readFileSync(f.fsPath, 'utf8');
+        const lines = text.split('\n');
+        for (let i = 0; i < lines.length; i++) {
+          if (lines[i].includes(`id="${data.id}"`) || lines[i].includes(`id='${data.id}'`)) {
+            return { filePath: f.fsPath, lineNumber: i + 1 };
+          }
+        }
+      }
+    } catch (e) {}
+  }
+
+  // 2. By unique class
+  if (data.className && typeof data.className === 'string') {
+    const classes = data.className.trim().split(/\s+/).filter(c => c.length > 4 && !c.startsWith('css-'));
+    if (classes.length > 0) {
+      const targetClass = classes[0];
+      try {
+        const files = await vscode.workspace.findFiles('**/*.{jsx,tsx,vue,svelte,html}', '**/node_modules/**', 20);
+        for (const f of files) {
+          const text = fs.readFileSync(f.fsPath, 'utf8');
+          const lines = text.split('\n');
+          for (let i = 0; i < lines.length; i++) {
+            if (lines[i].includes(targetClass)) {
+              return { filePath: f.fsPath, lineNumber: i + 1 };
+            }
+          }
+        }
+      } catch (e) {}
+    }
+  }
+
+  // 3. By innerText
+  if (data.innerText && data.innerText.length >= 4 && data.innerText.length <= 40) {
+    const cleanText = data.innerText.trim();
+    try {
+      const files = await vscode.workspace.findFiles('**/*.{jsx,tsx,vue,svelte,html}', '**/node_modules/**', 20);
+      for (const f of files) {
+        const text = fs.readFileSync(f.fsPath, 'utf8');
+        const lines = text.split('\n');
+        for (let i = 0; i < lines.length; i++) {
+          if (lines[i].includes(cleanText)) {
+            return { filePath: f.fsPath, lineNumber: i + 1 };
+          }
+        }
+      }
+    } catch (e) {}
+  }
+
+  return null;
+}
+
+async function getOrCreateSnapshotFile(data) {
+  const folders = vscode.workspace.workspaceFolders || [];
+  const root = folders.length > 0 ? folders[0].uri.fsPath : path.join(__dirname, '..');
+  const antigravityDir = path.join(root, '.antigravity');
+  if (!fs.existsSync(antigravityDir)) {
+    try { fs.mkdirSync(antigravityDir, { recursive: true }); } catch (e) {}
+  }
+
+  const snapshotPath = path.join(antigravityDir, 'elemento-selecionado.html');
+  const shortClass = data.className ? '.' + data.className.trim().split(/\s+/)[0] : '';
+  const content = `<!-- Elemento Selecionado no Antigravity Browser -->
+<!-- Tag: <${data.tagName}${data.id ? ' id="' + data.id + '"' : ''}${shortClass}> -->
+<!-- Seletor CSS: ${data.cssSelector || ''} -->
+<!-- Texto: ${data.innerText ? data.innerText.replace(/\n+/g, ' ') : ''} -->
+
+${data.html || `<${data.tagName}>${data.innerText || ''}</${data.tagName}>`}
+`;
   try {
-    await vscode.commands.executeCommand('antigravity.panel.focus');
-  } catch (err) {}
+    fs.writeFileSync(snapshotPath, content, 'utf8');
+    return snapshotPath;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function referenceElementInChat(data) {
+  try {
+    let filePath = null;
+    let lineNumber = 1;
+
+    if (data.react?.fileName) {
+      filePath = await resolveSourceFile(data.react.fileName);
+      lineNumber = data.react.lineNumber || 1;
+    } else if (data.vue?.fileName) {
+      filePath = await resolveSourceFile(data.vue.fileName);
+      lineNumber = 1;
+    }
+
+    if (!filePath) {
+      const match = await findElementInWorkspace(data);
+      if (match) {
+        filePath = match.filePath;
+        lineNumber = match.lineNumber;
+      }
+    }
+
+    if (!filePath) {
+      filePath = await getOrCreateSnapshotFile(data);
+      lineNumber = 1;
+    }
+
+    const shortClass = data.className ? '.' + data.className.trim().split(/\s+/)[0] : '';
+    const elementLabel = `<${data.tagName}${data.id ? ' #' + data.id : ''}${shortClass}>`;
+    const promptMessage = `Estou referenciando o elemento UI ${elementLabel}${data.innerText ? ` ("${data.innerText.slice(0, 45).replace(/\n+/g, ' ')}")` : ''}. `;
+
+    let contextAdded = false;
+
+    if (filePath) {
+      const fileUri = vscode.Uri.file(filePath).toString();
+      const contextItem = {
+        type: 'file',
+        uri: fileUri,
+        range: {
+          startLineNumber: lineNumber,
+          endLineNumber: lineNumber
+        }
+      };
+
+      try {
+        await vscode.commands.executeCommand('antigravity.addContext', [contextItem, promptMessage]);
+        contextAdded = true;
+      } catch (e1) {
+        try {
+          await vscode.commands.executeCommand('antigravity.addContext', contextItem, promptMessage);
+          contextAdded = true;
+        } catch (e2) {}
+      }
+    }
+
+    if (!contextAdded) {
+      try {
+        const formatted = formatContextMarkdown(data);
+        await vscode.commands.executeCommand('antigravity.addContext', formatted);
+        contextAdded = true;
+      } catch (e3) {}
+    }
+
+    // Always focus the Antigravity chat panel!
+    try {
+      await vscode.commands.executeCommand('antigravity.panel.focus');
+    } catch (e) {}
+
+    // Open source file in background editor if available
+    if (filePath && !filePath.includes('.antigravity')) {
+      try {
+        const doc = await vscode.workspace.openTextDocument(filePath);
+        const line = Math.max(0, lineNumber - 1);
+        await vscode.window.showTextDocument(doc, {
+          selection: new vscode.Range(line, 0, line, 0),
+          preserveFocus: true
+        });
+      } catch (e) {}
+    }
+
+    // Always copy markdown context to clipboard as backup
+    const markdown = formatContextMarkdown(data);
+    await vscode.env.clipboard.writeText(markdown);
+
+    vscode.window.showInformationMessage(
+      `Elemento ${elementLabel} referenciado no Chat do Antigravity!`
+    );
+  } catch (err) {
+    console.error('[Antigravity Browser] Erro ao referenciar no chat:', err);
+  }
 }
 
 function getWebviewHtml(currentUrl, port, activePorts = []) {
@@ -855,7 +1052,7 @@ function getWebviewHtml(currentUrl, port, activePorts = []) {
 
   <!-- Banner informativo quando o modo de seleção está ativo -->
   <div class="selection-banner" id="selection-banner">
-    <span>🎯 <b>Modo de Seleção Ativo:</b> Passe o mouse e clique no elemento que deseja inspecionar.</span>
+    <span>🎯 <b>Modo de Seleção Ativo:</b> Clique no elemento que deseja referenciar no Chat da IA.</span>
     <button class="selection-banner-close" id="banner-cancel-btn">Desativar (ESC)</button>
   </div>
 
@@ -876,7 +1073,7 @@ function getWebviewHtml(currentUrl, port, activePorts = []) {
     <div class="drawer-actions">
       <button class="action-btn" id="btn-open-file" style="display: none;">&#x1f4c2; Abrir Código</button>
       <button class="action-btn" id="btn-copy-clip">&#x1f4cb; Copiar Contexto</button>
-      <button class="action-btn primary" id="btn-send-chat">&#x2728; Adicionar ao Chat</button>
+      <button class="action-btn primary" id="btn-send-chat">&#x2728; Referenciar no Chat</button>
     </div>
   </div>
 
@@ -1066,6 +1263,7 @@ function getWebviewHtml(currentUrl, port, activePorts = []) {
         updateSelectedElementUI(selectedElementData);
         toggleInspectMode(false);
 
+        // Dispara a criação da referência diretamente para o Chat com a IA
         vscode.postMessage({
           type: 'ELEMENT_CAPTURED',
           data: selectedElementData
@@ -1254,55 +1452,14 @@ function activate(context) {
             case 'ELEMENT_CAPTURED': {
               const data = message.data;
               lastCapturedElement = data;
-              const formatted = formatContextMarkdown(data);
 
-              const autoAdd = config.get('autoAddToChat') !== false;
-              const autoClip = config.get('autoCopyToClipboard') !== false;
-              const autoOpen = config.get('autoOpenSourceFile') !== false;
-
-              if (autoClip) {
-                await vscode.env.clipboard.writeText(formatted);
-              }
-
-              if (autoAdd) {
-                await sendToAntigravityChat(formatted);
-              }
-
-              if (autoOpen && data.react && data.react.fileName) {
-                try {
-                  const doc = await vscode.workspace.openTextDocument(data.react.fileName);
-                  const line = Math.max(0, (data.react.lineNumber || 1) - 1);
-                  await vscode.window.showTextDocument(doc, {
-                    selection: new vscode.Range(line, 0, line, 0),
-                    preserveFocus: true
-                  });
-                } catch (e) {}
-              }
-
-              const actions = ['Ver no Chat'];
-              if (data.react && data.react.fileName) actions.push('Abrir Código');
-
-              vscode.window.showInformationMessage(
-                `Elemento <${data.tagName}> capturado e pronto no Antigravity!`,
-                ...actions
-              ).then(choice => {
-                if (choice === 'Ver no Chat') {
-                  vscode.commands.executeCommand('antigravity.panel.focus');
-                } else if (choice === 'Abrir Código' && data.react?.fileName) {
-                  vscode.workspace.openTextDocument(data.react.fileName).then(doc => {
-                    vscode.window.showTextDocument(doc, {
-                      selection: new vscode.Range((data.react.lineNumber || 1) - 1, 0, (data.react.lineNumber || 1) - 1, 0)
-                    });
-                  });
-                }
-              });
+              // Envia diretamente como referência para o Chat com a IA!
+              await referenceElementInChat(data);
               break;
             }
 
             case 'SEND_TO_CHAT': {
-              const formatted = formatContextMarkdown(message.data);
-              await sendToAntigravityChat(formatted);
-              vscode.window.showInformationMessage(`Contexto adicionado ao Antigravity Chat!`);
+              await referenceElementInChat(message.data);
               break;
             }
 
@@ -1316,7 +1473,8 @@ function activate(context) {
             case 'OPEN_SOURCE_FILE': {
               if (message.file) {
                 try {
-                  const doc = await vscode.workspace.openTextDocument(message.file);
+                  const resolved = await resolveSourceFile(message.file) || message.file;
+                  const doc = await vscode.workspace.openTextDocument(resolved);
                   const line = Math.max(0, (message.line || 1) - 1);
                   await vscode.window.showTextDocument(doc, {
                     selection: new vscode.Range(line, 0, line, 0)

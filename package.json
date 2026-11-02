@@ -2,7 +2,7 @@
   "name": "antigravity-browser",
   "displayName": "Antigravity Browser (Inspector)",
   "description": "Embedded browser tab with interactive element picker that injects DOM elements into Antigravity AI chat context.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "publisher": "antigravity-community",
   "engines": {
     "vscode": "^1.80.0"
