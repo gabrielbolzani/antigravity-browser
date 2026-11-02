@@ -1,0 +1,99 @@
+{
+  "name": "antigravity-browser",
+  "displayName": "Antigravity Browser (Inspector)",
+  "description": "Embedded browser tab with interactive element picker that injects DOM elements into Antigravity AI chat context.",
+  "version": "0.1.0",
+  "publisher": "antigravity-community",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Other",
+    "Web Development",
+    "Testing"
+  ],
+  "keywords": [
+    "browser",
+    "preview",
+    "inspector",
+    "antigravity",
+    "dom",
+    "react",
+    "ai"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "antigravity-browser.open",
+        "title": "Abrir Browser Tab",
+        "category": "Antigravity Browser",
+        "icon": "$(browser)"
+      },
+      {
+        "command": "antigravity-browser.inspect",
+        "title": "Acionar/Desacionar Seleção de Elemento",
+        "category": "Antigravity Browser",
+        "icon": "$(inspect)"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "antigravity-browser.open",
+          "group": "navigation@1",
+          "title": "Abrir Navegador no Antigravity"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "antigravity-browser.open",
+          "when": "view == antigravity.panel",
+          "group": "navigation@1",
+          "title": "Abrir Navegador Embutido"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "antigravity-browser.open"
+        },
+        {
+          "command": "antigravity-browser.inspect"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Antigravity Browser",
+      "properties": {
+        "antigravityBrowser.defaultUrl": {
+          "type": "string",
+          "default": "http://localhost:3000",
+          "description": "Default URL opened when launching the browser tab."
+        },
+        "antigravityBrowser.autoDetectPort": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically detect and connect to active local dev server ports (e.g. 8080, 5173, 3000)."
+        },
+        "antigravityBrowser.autoAddToChat": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically send selected element context directly into the Antigravity chat."
+        },
+        "antigravityBrowser.autoCopyToClipboard": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically copy selected element context to clipboard upon selection."
+        },
+        "antigravityBrowser.autoOpenSourceFile": {
+          "type": "boolean",
+          "default": true,
+          "description": "If a React component source file and line is detected, automatically open it in the editor."
+        }
+      }
+    }
+  }
+}
